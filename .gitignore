@@ -1,0 +1,15 @@
+.env
+.env.local
+*.pyc
+__pycache__/
+.venv/
+venv/
+.DS_Store
+
+# Runtime / paper state
+sniper_positions.json
+sniper_open_orders.json
+sniper_paper_account.json
+sniper_kill_state.json
+trade_log.json
+pool_snapshot.json

@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+venv
+.env
+.env.*
+sniper_positions.json
+sniper_open_orders.json
+sniper_paper_account.json
+sniper_kill_state.json
+trade_log.json
+pool_snapshot.json
