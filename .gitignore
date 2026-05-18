@@ -11,5 +11,8 @@ sniper_positions.json
 sniper_open_orders.json
 sniper_paper_account.json
 sniper_kill_state.json
+sniper_blacklist.json
+sniper_reentry.json
+gamma_vol_history.json
 trade_log.json
 pool_snapshot.json

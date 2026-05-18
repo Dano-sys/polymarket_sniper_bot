@@ -220,13 +220,19 @@ def evaluate_leg(market: dict, tok: dict) -> LegView:
         if ask is None:
             blockers.append("no_ask")
         else:
-            price_ok = bot.should_buy(ask)
+            price_ok = bot.should_buy(ask, market)
             if not price_ok:
                 blockers.append("ask_below_threshold")
             elif not bot.has_profit_room(ask):
                 blockers.append("no_profit_room")
             if spread_pct is not None and volume_24h is not None:
-                score = bot.score_market_for_upside(market, ask, spread_pct, float(volume_24h))
+                score = bot.score_market_for_upside(
+                    market,
+                    ask,
+                    spread_pct,
+                    float(volume_24h),
+                    hours_left=bot.hours_until_resolution(market),
+                )
                 score_ok = score >= bot.MIN_MARKET_SCORE
                 if not score_ok:
                     blockers.append("upside_score")

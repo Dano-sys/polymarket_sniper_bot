@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,7 +33,12 @@ from sniper_env import load_sniper_env
 import sniper_log as slog
 
 load_sniper_env()
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+_root_dir = Path(__file__).resolve().parent
+load_dotenv(_root_dir / ".env", override=True)
+if os.getenv("LOAD_SNIPER_TUNED", "").strip() == "1":
+    _tuned_env = _root_dir / ".env.sniper-tuned"
+    if _tuned_env.is_file():
+        load_dotenv(_tuned_env, override=True)
 
 
 def _resolve_state_path(env_key: str, default_name: str) -> str:
@@ -117,6 +123,55 @@ UPSIDE_VOLUME_SPIKE_MULTIPLIER = float(os.getenv("UPSIDE_VOLUME_SPIKE_MULTIPLIER
 UPSIDE_MOMENTUM_MAX_SPREAD_PCT = float(os.getenv("UPSIDE_MOMENTUM_MAX_SPREAD_PCT", "1.5"))
 UPSIDE_MOMENTUM_MIN_ASK = float(os.getenv("UPSIDE_MOMENTUM_MIN_ASK", "1.0"))
 UPSIDE_PRINT_MIN_SCORE = int(os.getenv("UPSIDE_PRINT_MIN_SCORE", "0"))
+UPSIDE_POINTS_RESOLUTION = int(os.getenv("UPSIDE_POINTS_RESOLUTION", "0"))
+UPSIDE_RESOLUTION_WEIGHT = float(os.getenv("UPSIDE_RESOLUTION_WEIGHT", "1.5"))
+UPSIDE_VOLUME_ACCEL_THRESHOLD = float(os.getenv("UPSIDE_VOLUME_ACCEL_THRESHOLD", "1.3"))
+UPSIDE_POINTS_VOLUME_ACCEL = int(os.getenv("UPSIDE_POINTS_VOLUME_ACCEL", "0"))
+BID_STABILITY_THRESHOLD = float(os.getenv("BID_STABILITY_THRESHOLD", "0"))
+BLUE_CHIP_VOLUME_THRESHOLD = float(os.getenv("BLUE_CHIP_VOLUME_THRESHOLD", "0"))
+BLUE_CHIP_PRICE_THRESHOLD = float(os.getenv("BLUE_CHIP_PRICE_THRESHOLD", "0.77"))
+UPSIDE_POINTS_BLUE_CHIP = int(os.getenv("UPSIDE_POINTS_BLUE_CHIP", "0"))
+UPSIDE_SCORE_MODE = (os.getenv("UPSIDE_SCORE_MODE") or "legacy").strip().lower()
+
+TRAILING_STOP = os.getenv("TRAILING_STOP", "false").lower() == "true"
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.5"))
+TRAILING_STOP_TRIGGER = float(os.getenv("TRAILING_STOP_TRIGGER", "0.01"))
+
+PARTIAL_EXIT = os.getenv("PARTIAL_EXIT", "false").lower() == "true"
+PARTIAL_EXIT_RATIO = min(1.0, max(0.0, float(os.getenv("PARTIAL_EXIT_RATIO", "0.5"))))
+PARTIAL_EXIT_RESIDUAL_SL = float(os.getenv("PARTIAL_EXIT_RESIDUAL_SL", "0.0"))
+
+SL_BLACKLIST_TTL_HOURS = float(os.getenv("SL_BLACKLIST_TTL_HOURS", "4"))
+SL_BLACKLIST_FILE = _resolve_state_path("SL_BLACKLIST_FILE", "sniper_blacklist.json")
+
+CHECK_RESOLUTION_ON_HOLD = os.getenv("CHECK_RESOLUTION_ON_HOLD", "false").lower() == "true"
+RESOLUTION_EXIT_PRICE = float(os.getenv("RESOLUTION_EXIT_PRICE", "0.99"))
+
+SNIPER_BOOK_FETCH_WORKERS = max(1, int(os.getenv("SNIPER_BOOK_FETCH_WORKERS", "8")))
+
+DYNAMIC_PRICE_THRESHOLD = os.getenv("DYNAMIC_PRICE_THRESHOLD", "false").lower() == "true"
+DYNAMIC_THRESHOLD_MAX_BOOST = float(os.getenv("DYNAMIC_THRESHOLD_MAX_BOOST", "0.10"))
+
+MIN_PROFIT_CENTS = float(os.getenv("MIN_PROFIT_CENTS", "0"))
+
+ALLOW_REENTRY = os.getenv("ALLOW_REENTRY", "true").lower() == "true"
+REENTRY_COOLDOWN_MINUTES = float(os.getenv("REENTRY_COOLDOWN_MINUTES", "15"))
+REENTRY_STATE_FILE = _resolve_state_path("REENTRY_STATE_FILE", "sniper_reentry.json")
+
+DYNAMIC_POSITION_SIZING = os.getenv("DYNAMIC_POSITION_SIZING", "false").lower() == "true"
+MAX_POSITION_QUALITY_MULT = float(os.getenv("MAX_POSITION_QUALITY_MULT", "1.75"))
+SIZE_BOOST_TIGHT_SPREAD = float(os.getenv("SIZE_BOOST_TIGHT_SPREAD", "0.3"))
+SIZE_BOOST_HIGH_VOLUME = float(os.getenv("SIZE_BOOST_HIGH_VOLUME", "0.2"))
+SIZE_BOOST_NEAR_RESOLUTION = float(os.getenv("SIZE_BOOST_NEAR_RESOLUTION", "0.25"))
+
+GAMMA_MARKET_CACHE_TTL_SEC = max(0, int(os.getenv("GAMMA_MARKET_CACHE_TTL_SEC", "300") or "0"))
+GAMMA_VOL_HISTORY_FILE = _resolve_state_path("GAMMA_VOL_HISTORY_FILE", "gamma_vol_history.json")
+
+_active_sleep_raw = (os.getenv("SNIPER_SLEEP_SECONDS_ACTIVE") or "").strip()
+SNIPER_SLEEP_SECONDS_ACTIVE = int(_active_sleep_raw) if _active_sleep_raw else 0
+
+TAKER_FEE_PCT = float(os.getenv("TAKER_FEE_PCT", "0"))
+MAKER_FEE_PCT = float(os.getenv("MAKER_FEE_PCT", "0"))
 
 _raw_keywords = (os.getenv("UPSIDE_CATALYST_KEYWORDS") or "").strip()
 UPSIDE_CATALYST_KEYWORDS: frozenset[str] = frozenset(
@@ -158,6 +213,11 @@ SNIPER_KILL_STATE_FILE = _resolve_state_path("SNIPER_KILL_STATE_FILE", "sniper_k
 MAX_SPREAD_PCT = MIN_BID_ASK_SPREAD * 100.0 if MIN_BID_ASK_SPREAD <= 1.0 else MIN_BID_ASK_SPREAD
 
 _gamma_vol_cache: Dict[str, float] = {}
+_gamma_market_cache: Dict[str, Tuple[dict, float]] = {}
+_last_bid_by_token: Dict[str, float] = {}
+_sl_blacklist: Dict[str, str] = {}
+_last_exit_by_token: Dict[str, str] = {}
+_gamma_vol_history: Dict[str, List[Dict[str, Any]]] = {}
 _proxy = (os.getenv("POLYMARKET_PROXY") or "").strip()
 _req_proxies = {"http": _proxy, "https": _proxy} if _proxy else None
 
@@ -196,6 +256,318 @@ def gamma_volume_24h(condition_id: str) -> float:
     except Exception:
         _gamma_vol_cache[condition_id] = 0.0
         return 0.0
+
+
+def _load_sl_blacklist() -> None:
+    global _sl_blacklist
+    if not os.path.isfile(SL_BLACKLIST_FILE):
+        _sl_blacklist = {}
+        return
+    try:
+        with open(SL_BLACKLIST_FILE, "r") as f:
+            data = json.load(f)
+        _sl_blacklist = data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"Warning: could not load {SL_BLACKLIST_FILE}: {e}")
+        _sl_blacklist = {}
+
+
+def _save_sl_blacklist() -> None:
+    try:
+        _ensure_parent_dir(SL_BLACKLIST_FILE)
+        with open(SL_BLACKLIST_FILE, "w") as f:
+            json.dump(_sl_blacklist, f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not save {SL_BLACKLIST_FILE}: {e}")
+
+
+def _prune_sl_blacklist() -> None:
+    now = datetime.now()
+    expired = []
+    for cid, exp_raw in list(_sl_blacklist.items()):
+        try:
+            exp = datetime.fromisoformat(str(exp_raw))
+        except ValueError:
+            expired.append(cid)
+            continue
+        if exp <= now:
+            expired.append(cid)
+    for cid in expired:
+        _sl_blacklist.pop(cid, None)
+
+
+def is_blacklisted(condition_id: str) -> bool:
+    if not condition_id or SL_BLACKLIST_TTL_HOURS <= 0:
+        return False
+    _prune_sl_blacklist()
+    exp_raw = _sl_blacklist.get(condition_id) or _sl_blacklist.get(condition_id.lower())
+    if not exp_raw:
+        return False
+    try:
+        return datetime.fromisoformat(str(exp_raw)) > datetime.now()
+    except ValueError:
+        return False
+
+
+def add_sl_blacklist(condition_id: str) -> None:
+    if not condition_id or SL_BLACKLIST_TTL_HOURS <= 0:
+        return
+    expires = datetime.now() + timedelta(hours=SL_BLACKLIST_TTL_HOURS)
+    _sl_blacklist[condition_id] = expires.isoformat()
+    _save_sl_blacklist()
+
+
+def _load_reentry_state() -> None:
+    global _last_exit_by_token
+    if not os.path.isfile(REENTRY_STATE_FILE):
+        _last_exit_by_token = {}
+        return
+    try:
+        with open(REENTRY_STATE_FILE, "r") as f:
+            data = json.load(f)
+        _last_exit_by_token = data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"Warning: could not load {REENTRY_STATE_FILE}: {e}")
+        _last_exit_by_token = {}
+
+
+def _save_reentry_state() -> None:
+    try:
+        _ensure_parent_dir(REENTRY_STATE_FILE)
+        with open(REENTRY_STATE_FILE, "w") as f:
+            json.dump(_last_exit_by_token, f, indent=2)
+    except Exception as e:
+        print(f"Warning: could not save {REENTRY_STATE_FILE}: {e}")
+
+
+def record_exit_cooldown(token_id: str) -> None:
+    if not token_id:
+        return
+    _last_exit_by_token[token_id] = datetime.now().isoformat()
+    _save_reentry_state()
+
+
+def reentry_blocked(token_id: str) -> bool:
+    if ALLOW_REENTRY:
+        if REENTRY_COOLDOWN_MINUTES <= 0:
+            return False
+        raw = _last_exit_by_token.get(token_id)
+        if not raw:
+            return False
+        try:
+            last = datetime.fromisoformat(str(raw))
+        except ValueError:
+            return False
+        return (datetime.now() - last).total_seconds() < REENTRY_COOLDOWN_MINUTES * 60.0
+    return bool(_last_exit_by_token.get(token_id))
+
+
+def _load_gamma_vol_history() -> None:
+    global _gamma_vol_history
+    if not os.path.isfile(GAMMA_VOL_HISTORY_FILE):
+        _gamma_vol_history = {}
+        return
+    try:
+        with open(GAMMA_VOL_HISTORY_FILE, "r") as f:
+            data = json.load(f)
+        _gamma_vol_history = data if isinstance(data, dict) else {}
+    except Exception:
+        _gamma_vol_history = {}
+
+
+def _save_gamma_vol_history() -> None:
+    try:
+        _ensure_parent_dir(GAMMA_VOL_HISTORY_FILE)
+        with open(GAMMA_VOL_HISTORY_FILE, "w") as f:
+            json.dump(_gamma_vol_history, f, indent=2)
+    except Exception:
+        pass
+
+
+def _record_volume_snapshot(condition_id: str, volume_24h: float) -> None:
+    if not condition_id or volume_24h <= 0:
+        return
+    now = datetime.now().isoformat()
+    hist = _gamma_vol_history.setdefault(condition_id, [])
+    if hist and hist[-1].get("ts") == now:
+        hist[-1]["vol"] = volume_24h
+    else:
+        hist.append({"ts": now, "vol": volume_24h})
+    if len(hist) > 48:
+        _gamma_vol_history[condition_id] = hist[-48:]
+    _save_gamma_vol_history()
+
+
+def volume_acceleration(condition_id: str, volume_24h: float) -> Optional[float]:
+    if not condition_id or volume_24h <= 0:
+        return None
+    _record_volume_snapshot(condition_id, volume_24h)
+    hist = _gamma_vol_history.get(condition_id) or []
+    if len(hist) < 2:
+        return None
+    now = datetime.now()
+    ref_vol = None
+    for snap in reversed(hist[:-1]):
+        try:
+            ts = datetime.fromisoformat(str(snap["ts"]))
+        except (ValueError, KeyError):
+            continue
+        hours_ago = (now - ts).total_seconds() / 3600.0
+        if hours_ago >= 5.5:
+            ref_vol = float(snap.get("vol", 0))
+            break
+    if ref_vol is None or ref_vol <= 0:
+        return None
+    return (ref_vol * 4.0) / volume_24h
+
+
+def fetch_gamma_market_row(condition_id: str) -> Optional[dict]:
+    if not condition_id:
+        return None
+    key = condition_id.lower()
+    if GAMMA_MARKET_CACHE_TTL_SEC > 0 and key in _gamma_market_cache:
+        row, expiry = _gamma_market_cache[key]
+        if time.monotonic() < expiry:
+            return row
+    try:
+        r = _get(f"{GAMMA_API}/markets", params={"condition_ids": condition_id})
+        if not r.ok:
+            return None
+        data = r.json()
+        rows = data if isinstance(data, list) else data.get("data") or []
+        row = None
+        for item in rows:
+            if str(item.get("conditionId") or "").lower() == key:
+                row = item
+                break
+        if row is None and rows:
+            row = rows[0]
+        if row and GAMMA_MARKET_CACHE_TTL_SEC > 0:
+            _gamma_market_cache[key] = (row, time.monotonic() + GAMMA_MARKET_CACHE_TTL_SEC)
+        return row
+    except Exception:
+        return None
+
+
+def _market_has_catalyst(market: dict) -> bool:
+    if not UPSIDE_CATALYST_KEYWORDS:
+        return False
+    parts: List[str] = []
+    q = market.get("question") or market.get("title")
+    if q:
+        parts.append(str(q).lower())
+    for key in ("description", "groupItemTitle", "slug"):
+        v = market.get(key)
+        if v:
+            parts.append(str(v).lower())
+    hay = " ".join(parts)
+    return any(k in hay for k in UPSIDE_CATALYST_KEYWORDS)
+
+
+def is_binary_market(market: dict) -> bool:
+    tokens = market.get("tokens") or []
+    if len(tokens) == 2:
+        return True
+    outcomes = market.get("outcomes")
+    if isinstance(outcomes, list) and len(outcomes) == 2:
+        return True
+    if isinstance(outcomes, str):
+        try:
+            parsed = json.loads(outcomes)
+            return isinstance(parsed, list) and len(parsed) == 2
+        except json.JSONDecodeError:
+            pass
+    return False
+
+
+def effective_price_threshold(market: dict) -> float:
+    threshold = PRICE_THRESHOLD
+    vol = float(market.get("gamma_volume_24h") or 0)
+    if (
+        BLUE_CHIP_VOLUME_THRESHOLD > 0
+        and is_binary_market(market)
+        and vol >= BLUE_CHIP_VOLUME_THRESHOLD
+    ):
+        threshold = min(threshold, BLUE_CHIP_PRICE_THRESHOLD)
+    if not DYNAMIC_PRICE_THRESHOLD or MAX_HOURS_TO_RESOLUTION <= 0:
+        return threshold
+    hrs = hours_until_resolution(market)
+    if hrs is None:
+        return threshold
+    ratio = max(0.0, min(1.0, hrs / MAX_HOURS_TO_RESOLUTION))
+    boost = DYNAMIC_THRESHOLD_MAX_BOOST * (1.0 - ratio)
+    return threshold + boost
+
+
+def _min_profitable_exit_fill(entry_price: float) -> float:
+    pct_fill = entry_price * (1.0 + PROFIT_TARGET_PCT / 100.0)
+    if MIN_PROFIT_CENTS > 0:
+        return max(pct_fill, entry_price + MIN_PROFIT_CENTS)
+    return pct_fill
+
+
+def estimated_exit_fill_price(reference_bid: float) -> float:
+    if DRY_RUN:
+        return _paper_sell_fill_price(reference_bid)
+    return round(max(float(reference_bid) - SLIPPAGE_TOLERANCE_SELL, 0.01), 4)
+
+
+def _net_profitable_exit(entry_price: float, bid: float) -> bool:
+    if entry_price <= 0 or bid <= 0:
+        return False
+    est_fill = estimated_exit_fill_price(bid)
+    return est_fill >= _min_profitable_exit_fill(entry_price) - 1e-9
+
+
+def compute_target_exit_bid(entry_price: float) -> float:
+    """Minimum bid so estimated sell fill hits the profit target."""
+    min_fill = _min_profitable_exit_fill(entry_price)
+    target_bid = min_fill + SLIPPAGE_TOLERANCE_SELL
+    exit_cap = profit_room_exit_cap()
+    if exit_cap > 0:
+        target_bid = min(target_bid, exit_cap + SLIPPAGE_TOLERANCE_SELL)
+    return round(min(max(target_bid, 0.01), 0.99), 4)
+
+
+def compute_target_exit_price(entry_price: float) -> float:
+    return compute_target_exit_bid(entry_price)
+
+
+def _apply_trade_fees(pnl_usd: float, entry_price: float, exit_price: float, qty: float) -> float:
+    fee_pct = max(TAKER_FEE_PCT, MAKER_FEE_PCT)
+    if fee_pct <= 0 or qty <= 0:
+        return pnl_usd
+    entry_notional = entry_price * qty
+    exit_notional = exit_price * qty
+    fees = (entry_notional + exit_notional) * (fee_pct / 100.0)
+    return pnl_usd - fees
+
+
+def passes_bid_stability(token_id: str, bid: Optional[float]) -> bool:
+    if BID_STABILITY_THRESHOLD <= 0 or bid is None or bid <= 0:
+        return True
+    last = _last_bid_by_token.get(token_id)
+    _last_bid_by_token[token_id] = float(bid)
+    if last is None or last <= 0:
+        return True
+    move = abs(float(bid) - last) / last
+    return move <= BID_STABILITY_THRESHOLD
+
+
+def _position_quality_multiplier(opp: dict) -> float:
+    if not DYNAMIC_POSITION_SIZING:
+        return 1.0
+    mult = 1.0
+    spread = opp.get("spread_pct")
+    if spread is not None and float(spread) < 0.5:
+        mult += SIZE_BOOST_TIGHT_SPREAD
+    vol = float(opp.get("volume_24h") or 0)
+    if vol >= MIN_24H_VOLUME * 5:
+        mult += SIZE_BOOST_HIGH_VOLUME
+    hrs = opp.get("hours_to_resolution")
+    if hrs is not None and float(hrs) < 2:
+        mult += SIZE_BOOST_NEAR_RESOLUTION
+    return min(mult, MAX_POSITION_QUALITY_MULT)
 
 
 positions: Dict[str, Dict[str, Any]] = {}
@@ -256,6 +628,9 @@ def load_state() -> None:
             print(f"Warning: could not load {PAPER_ACCOUNT_FILE}: {e}")
     elif DRY_RUN and not positions:
         paper_cash_usd = PAPER_STARTING_BALANCE_USD
+    _load_sl_blacklist()
+    _load_reentry_state()
+    _load_gamma_vol_history()
 
 
 def save_state() -> None:
@@ -870,15 +1245,28 @@ def score_market_for_upside(
     ask: float,
     spread_pct: float,
     volume_24h: float,
+    hours_left: Optional[float] = None,
 ) -> int:
     """
     Upside 0..UPSIDE_SCORE_MAX from env-driven rules only (no literals in body).
     If REQUIRE_MARKET_MOMENTUM and the momentum rule does not fire, returns 0.
     """
+    if UPSIDE_SCORE_MODE == "weighted":
+        threshold = effective_price_threshold(market)
+        base = (ask - threshold) / max(1e-9, 1.0 - threshold) * 4.0
+        vol_score = min(volume_24h / 10000.0, 2.0)
+        spread_score = max(0.0, 2.0 - spread_pct * 4.0)
+        hrs = hours_left if hours_left is not None else hours_until_resolution(market)
+        time_score = max(0.0, 2.0 - (hrs or 99.0) / 3.0)
+        catalyst_bonus = 1.0 if _market_has_catalyst(market) else 0.0
+        raw = base + vol_score + spread_score + time_score + catalyst_bonus
+        return max(0, min(UPSIDE_SCORE_MAX, int(raw)))
+
     score = 0
     momentum_ok = False
+    threshold = effective_price_threshold(market)
 
-    min_ask_line = PRICE_THRESHOLD * UPSIDE_MOMENTUM_MIN_ASK
+    min_ask_line = threshold * UPSIDE_MOMENTUM_MIN_ASK
     if ask >= min_ask_line and spread_pct <= UPSIDE_MOMENTUM_MAX_SPREAD_PCT:
         momentum_ok = True
         score += UPSIDE_POINTS_MOMENTUM
@@ -887,18 +1275,26 @@ def score_market_for_upside(
     if volume_24h >= vol_line:
         score += UPSIDE_POINTS_VOLUME
 
-    if UPSIDE_CATALYST_KEYWORDS:
-        parts: List[str] = []
-        q = market.get("question") or market.get("title")
-        if q:
-            parts.append(str(q).lower())
-        for key in ("description", "groupItemTitle", "slug"):
-            v = market.get(key)
-            if v:
-                parts.append(str(v).lower())
-        hay = " ".join(parts)
-        if any(k in hay for k in UPSIDE_CATALYST_KEYWORDS):
-            score += UPSIDE_POINTS_CATALYST
+    if UPSIDE_POINTS_RESOLUTION > 0 and ask > threshold:
+        resolution_pts = (ask - threshold) / max(1e-9, 1.0 - threshold) * UPSIDE_POINTS_RESOLUTION
+        score += int(resolution_pts * UPSIDE_RESOLUTION_WEIGHT)
+
+    if UPSIDE_POINTS_VOLUME_ACCEL > 0:
+        cid = str(market.get("condition_id") or market.get("conditionId") or "")
+        accel = volume_acceleration(cid, volume_24h)
+        if accel is not None and accel >= UPSIDE_VOLUME_ACCEL_THRESHOLD:
+            score += UPSIDE_POINTS_VOLUME_ACCEL
+
+    if UPSIDE_CATALYST_KEYWORDS and _market_has_catalyst(market):
+        score += UPSIDE_POINTS_CATALYST
+
+    if (
+        UPSIDE_POINTS_BLUE_CHIP > 0
+        and BLUE_CHIP_VOLUME_THRESHOLD > 0
+        and is_binary_market(market)
+        and volume_24h >= BLUE_CHIP_VOLUME_THRESHOLD
+    ):
+        score += UPSIDE_POINTS_BLUE_CHIP
 
     if REQUIRE_MARKET_MOMENTUM and not momentum_ok:
         return 0
@@ -906,8 +1302,9 @@ def score_market_for_upside(
     return max(0, min(UPSIDE_SCORE_MAX, score))
 
 
-def should_buy(outcome_price: float) -> bool:
-    return outcome_price >= PRICE_THRESHOLD
+def should_buy(outcome_price: float, market: Optional[dict] = None) -> bool:
+    threshold = effective_price_threshold(market) if market else PRICE_THRESHOLD
+    return outcome_price >= threshold
 
 
 def estimated_entry_fill_price(reference_ask: float, *, for_drag_screen: bool = False) -> float:
@@ -973,15 +1370,16 @@ def format_entry_ask_window() -> str:
     )
 
 
-def has_profit_room(entry_price: float) -> bool:
+def has_profit_room(ask_price: float) -> bool:
     if not REQUIRE_PROFIT_ROOM:
         return True
-    if entry_price > effective_max_entry_ask() + 1e-9:
+    if ask_price > effective_max_entry_ask() + 1e-9:
         return False
     exit_cap = profit_room_exit_cap()
     if exit_cap <= 0:
         return False
-    return entry_price * (1.0 + PROFIT_TARGET_PCT / 100.0) <= exit_cap + 1e-9
+    entry_fill = estimated_entry_fill_price(ask_price)
+    return _min_profitable_exit_fill(entry_fill) <= exit_cap + 1e-9
 
 
 def _position_portfolio_totals() -> Tuple[float, float, float]:
@@ -1019,28 +1417,39 @@ def _compound_surplus_usd(slots_remaining: int) -> float:
     return max(0.0, deployable - base_budget)
 
 
-def calculate_position_stake_usd(slots_remaining: int) -> float:
+def calculate_position_stake_usd(
+    slots_remaining: int, *, quality_multiplier: float = 1.0
+) -> float:
     if POSITION_SIZE_USD <= 0:
         return 0.0
     if not COMPOUND_POSITIONS:
-        return float(POSITION_SIZE_USD)
+        stake = float(POSITION_SIZE_USD)
+    else:
+        deployable = _deployable_capital_usd()
+        if deployable <= 0:
+            return 0.0
+        slots = max(1, int(slots_remaining))
+        surplus = _compound_surplus_usd(slots)
+        stake = float(POSITION_SIZE_USD) + surplus / slots
+        stake = min(stake, deployable)
+    stake *= max(1.0, quality_multiplier)
     deployable = _deployable_capital_usd()
-    if deployable <= 0:
-        return 0.0
-    slots = max(1, int(slots_remaining))
-    surplus = _compound_surplus_usd(slots)
-    stake = float(POSITION_SIZE_USD) + surplus / slots
-    stake = min(stake, deployable)
+    if deployable > 0:
+        stake = min(stake, deployable)
     stake = max(MIN_POSITION_SIZE_USD, stake)
     if MAX_POSITION_SIZE_USD > 0:
         stake = min(stake, MAX_POSITION_SIZE_USD)
     return round(stake, 2)
 
 
-def calculate_position_size(entry_price: float, *, slots_remaining: int = 1) -> float:
+def calculate_position_size(
+    entry_price: float, *, slots_remaining: int = 1, quality_multiplier: float = 1.0
+) -> float:
     if entry_price == 0:
         return 0.0
-    stake_usd = calculate_position_stake_usd(slots_remaining)
+    stake_usd = calculate_position_stake_usd(
+        slots_remaining, quality_multiplier=quality_multiplier
+    )
     if stake_usd <= 0:
         return 0.0
     return stake_usd / entry_price
@@ -1088,8 +1497,59 @@ def _stop_loss_allowed(position: dict) -> bool:
 
 
 def _stop_loss_bid_floor(position: dict) -> float:
+    custom = position.get("stop_loss_floor")
+    if custom is not None:
+        try:
+            return float(custom)
+        except (TypeError, ValueError):
+            pass
     entry_bid = _position_entry_bid(position)
     return entry_bid * (1.0 - STOP_LOSS_PCT / 100.0)
+
+
+def _trailing_stop_armed(position: dict, bid: float) -> bool:
+    entry = float(position.get("price", 0) or 0)
+    if entry <= 0 or bid <= 0:
+        return False
+    return estimated_exit_fill_price(bid) > entry + 1e-9
+
+
+def _update_trailing_stop(position: dict, bid: float) -> None:
+    if not TRAILING_STOP or bid <= 0:
+        return
+    if not position.get("trail_armed"):
+        if not _trailing_stop_armed(position, bid):
+            return
+        position["trail_armed"] = True
+    entry_bid = _position_entry_bid(position)
+    hwm = float(position.get("high_water_bid") or entry_bid)
+    if bid > hwm:
+        position["high_water_bid"] = bid
+        hwm = bid
+    position["trail_floor"] = hwm * (1.0 - TRAILING_STOP_PCT / 100.0)
+
+
+def _stop_out_reason(position: dict, bid: float) -> Optional[str]:
+    if not _stop_loss_allowed(position):
+        return None
+    if TRAILING_STOP and position.get("trail_armed"):
+        trail_floor = position.get("trail_floor")
+        if trail_floor is not None and bid < float(trail_floor):
+            return "trailing_stop"
+        return None
+    if bid < _stop_loss_bid_floor(position):
+        return "stop_loss"
+    return None
+
+
+def _effective_cycle_sleep_seconds() -> int:
+    if SNIPER_SLEEP_SECONDS_ACTIVE <= 0:
+        return SNIPER_SLEEP_SECONDS
+    for pos in positions.values():
+        hrs = _position_hours_to_resolution(pos)
+        if hrs is not None and hrs < 2:
+            return SNIPER_SLEEP_SECONDS_ACTIVE
+    return SNIPER_SLEEP_SECONDS
 
 
 def _live_keys_ok() -> bool:
@@ -1211,7 +1671,10 @@ def _position_mark_pnl(position: dict) -> Tuple[float, float, float, Optional[fl
     if bid is None or bid <= 0:
         return 0.0, cost, cost, bid, ask
     mtm = bid * qty
-    return mtm - cost, mtm, cost, bid, ask
+    gross = mtm - cost
+    if TAKER_FEE_PCT > 0 or MAKER_FEE_PCT > 0:
+        gross = _apply_trade_fees(gross, entry, bid, qty)
+    return gross, mtm, cost, bid, ask
 
 
 def _print_open_positions() -> None:
@@ -1351,6 +1814,12 @@ def place_buy_order(
         print(f"\n⏸️  Kill switch — skipping BUY ({_kill_pause_message()})")
         return None
     pos_key = f"{market_id}_{token_id}"
+    if reentry_blocked(token_id):
+        print(f"\n⏸️  Re-entry cooldown — skipping BUY {outcome}")
+        return None
+    if condition_id and is_blacklisted(condition_id):
+        print(f"\n⏸️  Blacklisted market — skipping BUY {outcome}")
+        return None
     if POSITION_SIZE_USD <= 0:
         print(
             f"\n[DRY RUN] Would BUY {outcome} @ ${price:.4f} qty≈{qty:.2f} (POSITION_SIZE_USD=0)"
@@ -1386,13 +1855,14 @@ def place_buy_order(
                 f"need ${cost_usd:.2f}, have ${paper_cash_usd:.2f}"
             )
             return None
+        target_exit = compute_target_exit_price(fill_price)
         slog.buy_action(
             dry_run=True,
             outcome=outcome,
             price=fill_price,
             qty=qty,
             notional=cost_usd,
-            target_exit=fill_price * (1 + PROFIT_TARGET_PCT / 100),
+            target_exit=target_exit,
             profit_target_pct=PROFIT_TARGET_PCT,
             hours_to_resolution=hours_to_resolution,
         )
@@ -1407,7 +1877,7 @@ def place_buy_order(
             "qty": qty,
             "cost_usd": cost_usd,
             "entry_time": datetime.now().isoformat(),
-            "target_exit_price": fill_price * (1 + PROFIT_TARGET_PCT / 100),
+            "target_exit_price": target_exit,
             "market_question": market_question,
             "neg_risk_hint": neg_risk_hint,
             "resolution_end": resolution_end or "",
@@ -1442,6 +1912,7 @@ def place_buy_order(
         traceback.print_exc()
         return None
 
+    target_exit = compute_target_exit_price(price)
     order = {
         "token_id": token_id,
         "market_id": market_id,
@@ -1453,7 +1924,7 @@ def place_buy_order(
         "qty": qty,
         "cost_usd": price * qty,
         "entry_time": datetime.now().isoformat(),
-        "target_exit_price": price * (1 + PROFIT_TARGET_PCT / 100),
+        "target_exit_price": target_exit,
         "market_question": market_question,
         "neg_risk_hint": neg_risk_hint,
         "resolution_end": resolution_end or "",
@@ -1467,14 +1938,61 @@ def place_buy_order(
         price=price,
         qty=qty,
         notional=price * qty,
-        target_exit=order["target_exit_price"],
+        target_exit=target_exit,
         profit_target_pct=PROFIT_TARGET_PCT,
         hours_to_resolution=hours_to_resolution,
     )
     return order
 
 
-def _sell_position_live(pos_key: str, position: dict, reason: str) -> bool:
+def _close_position_paper(
+    pos_key: str, position: dict, reason: str, bid: float, *, qty: Optional[float] = None
+) -> bool:
+    global paper_cash_usd
+    time.sleep(SELL_ALLOWANCE_DELAY_SEC)
+    total_qty = float(position.get("qty", 0))
+    sell_qty = float(qty) if qty is not None else total_qty
+    if sell_qty <= 0 or sell_qty > total_qty + 1e-9:
+        return False
+    entry = float(position.get("price", 0))
+    fill_bid = _paper_sell_fill_price(bid)
+    proceeds = round(float(fill_bid) * sell_qty, 2)
+    paper_cash_usd = round(float(paper_cash_usd) + proceeds, 2)
+    gross_pnl = (fill_bid - entry) * sell_qty
+    pnl_usd = _apply_trade_fees(gross_pnl, entry, fill_bid, sell_qty)
+    exit_row = {
+        "event": "sell",
+        "reason": reason,
+        "token_id": position.get("token_id"),
+        "outcome": position.get("outcome"),
+        "exit_time": datetime.now().isoformat(),
+        "reference_bid": bid,
+        "fill_price": fill_bid,
+        "entry_price": entry,
+        "qty": sell_qty,
+        "pnl_usd": pnl_usd,
+        "paper": True,
+    }
+    trade_log.append(exit_row)
+    remaining = round(total_qty - sell_qty, 6)
+    if remaining > 1e-6:
+        position["qty"] = remaining
+        position["cost_usd"] = round(entry * remaining, 2)
+        save_state()
+        return True
+    if reason in ("stop_loss", "trailing_stop"):
+        cid = (position.get("condition_id") or "").strip()
+        if cid:
+            add_sl_blacklist(cid)
+    record_exit_cooldown(str(position.get("token_id") or ""))
+    del positions[pos_key]
+    save_state()
+    return True
+
+
+def _sell_position_live(
+    pos_key: str, position: dict, reason: str, *, qty: Optional[float] = None
+) -> bool:
     if not _live_keys_ok():
         print("LIVE SELL: missing PRIVATE_KEY — cannot submit")
         return False
@@ -1485,7 +2003,10 @@ def _sell_position_live(pos_key: str, position: dict, reason: str) -> bool:
     if bid is None or bid <= 0:
         print(f"LIVE SELL skip: no bid for {token_id[:16]}...")
         return False
-    qty = float(position.get("qty", 0))
+    total_qty = float(position.get("qty", 0))
+    sell_qty = float(qty) if qty is not None else total_qty
+    if sell_qty <= 0:
+        return False
     entry = float(position.get("price", 0))
     try:
         trader = live_trader_singleton()
@@ -1493,7 +2014,7 @@ def _sell_position_live(pos_key: str, position: dict, reason: str) -> bool:
         trader.refresh_conditional_allowance(token_id)
         resp = trader.place_sell_fak(
             token_id,
-            qty,
+            sell_qty,
             bid,
             (position.get("condition_id") or "").strip() or None,
             SLIPPAGE_TOLERANCE_SELL,
@@ -1510,6 +2031,8 @@ def _sell_position_live(pos_key: str, position: dict, reason: str) -> bool:
         print(f"LIVE SELL failed ({reason}): {e}")
         traceback.print_exc()
         return False
+    gross_pnl = (bid - entry) * sell_qty
+    pnl_usd = _apply_trade_fees(gross_pnl, entry, bid, sell_qty)
     exit_row = {
         "event": "sell",
         "reason": reason,
@@ -1518,95 +2041,127 @@ def _sell_position_live(pos_key: str, position: dict, reason: str) -> bool:
         "exit_time": datetime.now().isoformat(),
         "reference_bid": bid,
         "entry_price": entry,
-        "qty": qty,
-        "pnl_usd": (bid - entry) * qty,
+        "qty": sell_qty,
+        "pnl_usd": pnl_usd,
     }
     trade_log.append(exit_row)
-    save_state()
+    remaining = round(total_qty - sell_qty, 6)
+    if remaining > 1e-6:
+        position["qty"] = remaining
+        position["cost_usd"] = round(entry * remaining, 2)
+        save_state()
+        return True
+    if reason in ("stop_loss", "trailing_stop"):
+        cid = (position.get("condition_id") or "").strip()
+        if cid:
+            add_sl_blacklist(cid)
+    record_exit_cooldown(token_id)
     return True
 
 
-def _close_position_paper(pos_key: str, position: dict, reason: str, bid: float) -> bool:
-    global paper_cash_usd
-    time.sleep(SELL_ALLOWANCE_DELAY_SEC)
-    qty = float(position.get("qty", 0))
-    entry = float(position.get("price", 0))
-    fill_bid = _paper_sell_fill_price(bid)
-    proceeds = round(float(fill_bid) * qty, 2)
-    paper_cash_usd = round(float(paper_cash_usd) + proceeds, 2)
-    exit_row = {
-        "event": "sell",
-        "reason": reason,
-        "token_id": position.get("token_id"),
-        "outcome": position.get("outcome"),
-        "exit_time": datetime.now().isoformat(),
-        "reference_bid": bid,
-        "fill_price": fill_bid,
-        "entry_price": entry,
-        "qty": qty,
-        "pnl_usd": (fill_bid - entry) * qty,
-        "paper": True,
-    }
-    trade_log.append(exit_row)
-    del positions[pos_key]
-    save_state()
-    return True
+def _execute_exit(
+    pos_key: str,
+    position: dict,
+    reason: str,
+    bid: float,
+    *,
+    qty: Optional[float] = None,
+) -> bool:
+    token_id = position["token_id"]
+    entry = float(position["price"])
+    sell_qty = float(qty) if qty is not None else float(position.get("qty", 0))
+    est_fill = estimated_exit_fill_price(bid)
+    gross_pnl = (est_fill - entry) * sell_qty
+    pnl_usd = _apply_trade_fees(gross_pnl, entry, est_fill, sell_qty)
+    pnl_pct = ((est_fill - entry) / entry) * 100 if entry > 0 else 0.0
+    slog.sell_action(
+        dry_run=DRY_RUN,
+        reason=reason,
+        outcome=str(position.get("outcome", "")),
+        bid=bid,
+        pnl_usd=pnl_usd,
+        pnl_pct=pnl_pct,
+    )
+    if DRY_RUN:
+        return _close_position_paper(pos_key, position, reason, bid, qty=qty)
+    if _has_resting_sell_order(token_id):
+        print(f"   Resting SELL already on book for {token_id[:16]}... — skip duplicate exit")
+        return False
+    if _sell_position_live(pos_key, position, reason, qty=qty):
+        if pos_key in positions and qty is not None:
+            return True
+        if pos_key in positions:
+            del positions[pos_key]
+        save_state()
+        return True
+    return False
+
+
+def _check_resolution_exits() -> List[str]:
+    if not CHECK_RESOLUTION_ON_HOLD or not positions:
+        return []
+    exited: List[str] = []
+    for pos_key, position in list(positions.items()):
+        cid = (position.get("condition_id") or "").strip()
+        if not cid:
+            continue
+        row = fetch_gamma_market_row(cid)
+        if not row or not row.get("closed"):
+            continue
+        bid = RESOLUTION_EXIT_PRICE
+        if _execute_exit(pos_key, position, "resolution", bid):
+            if pos_key not in positions:
+                exited.append(str(position.get("outcome", "")))
+    return exited
 
 
 def check_exit_conditions() -> List[str]:
     """Use best bid for exitability (sell into bid)."""
     exited: List[str] = []
+    exited.extend(_check_resolution_exits())
     for pos_key, position in list(positions.items()):
+        if pos_key not in positions:
+            continue
         token_id = position["token_id"]
-        target = float(position["target_exit_price"])
         entry = float(position["price"])
+        target = float(position.get("target_exit_price") or compute_target_exit_bid(entry))
         bid, ask = fetch_order_book(token_id)
         if bid is None:
             continue
 
-        if bid >= target:
-            profit_pct = ((bid - entry) / entry) * 100
-            profit_usd = (bid - entry) * float(position["qty"])
-            slog.sell_action(
-                dry_run=DRY_RUN,
-                reason="profit_target",
-                outcome=str(position.get("outcome", "")),
-                bid=bid,
-                pnl_usd=profit_usd,
-                pnl_pct=profit_pct,
-            )
-            if DRY_RUN:
-                if _close_position_paper(pos_key, position, "profit_target", bid):
+        _update_trailing_stop(position, bid)
+
+        if (
+            PARTIAL_EXIT
+            and not position.get("partial_taken")
+            and bid >= target
+            and _net_profitable_exit(entry, bid)
+        ):
+            total_qty = float(position.get("qty", 0))
+            sell_qty = round(total_qty * PARTIAL_EXIT_RATIO, 4)
+            if sell_qty > 0 and sell_qty < total_qty:
+                entry_bid = _position_entry_bid(position)
+                floor = entry_bid + PARTIAL_EXIT_RESIDUAL_SL
+                position["partial_taken"] = True
+                position["stop_loss_floor"] = floor
+                position["target_exit_price"] = compute_target_exit_bid(entry)
+                save_state()
+                if _execute_exit(pos_key, position, "partial_profit", bid, qty=sell_qty):
                     exited.append(str(position.get("outcome", "")))
                 continue
-            if _has_resting_sell_order(token_id):
-                print(f"   Resting SELL already on book for {token_id[:16]}... — skip duplicate exit")
-                continue
-            if _sell_position_live(pos_key, position, "profit_target"):
-                del positions[pos_key]
-                save_state()
+
+        if (
+            bid >= target
+            and _net_profitable_exit(entry, bid)
+            and not (PARTIAL_EXIT and not position.get("partial_taken"))
+        ):
+            if _execute_exit(pos_key, position, "profit_target", bid):
                 exited.append(str(position.get("outcome", "")))
-        elif _stop_loss_allowed(position) and bid < _stop_loss_bid_floor(position):
-            loss_pct = ((bid - entry) / entry) * 100
-            loss_usd = (bid - entry) * float(position["qty"])
-            slog.sell_action(
-                dry_run=DRY_RUN,
-                reason="stop_loss",
-                outcome=str(position.get("outcome", "")),
-                bid=bid,
-                pnl_usd=loss_usd,
-                pnl_pct=loss_pct,
-            )
-            if DRY_RUN:
-                if _close_position_paper(pos_key, position, "stop_loss", bid):
-                    exited.append(str(position.get("outcome", "")))
-                continue
-            if _has_resting_sell_order(token_id):
-                print(f"   Resting SELL already on book for {token_id[:16]}... — skip duplicate exit")
-                continue
-            if _sell_position_live(pos_key, position, "stop_loss"):
-                del positions[pos_key]
-                save_state()
+            continue
+
+        sl_reason = _stop_out_reason(position, bid)
+        if sl_reason:
+            if _execute_exit(pos_key, position, sl_reason, bid):
                 exited.append(str(position.get("outcome", "")))
     return exited
 
@@ -1619,6 +2174,61 @@ def _print_opportunity_line(opp: dict, *, note: str = "") -> None:
         print_min_score=UPSIDE_PRINT_MIN_SCORE,
         profit_target_pct=PROFIT_TARGET_PCT,
     )
+
+
+def _evaluate_scan_work_item(work: dict) -> Tuple[Optional[dict], str]:
+    """Returns (opportunity dict or None, filter_reason). filter_reason '' means success."""
+    token_id = work["token_id"]
+    market = work["market"]
+    condition_id = work["condition_id"]
+    vol_hint = work.get("vol_hint")
+    book_data = _fetch_order_book_payload(token_id)
+    if not book_data:
+        return None, "no book"
+    is_liquid, spread_pct, depth, volume, bid, ask = check_liquidity(
+        token_id, condition_id or None, vol_hint, book_data
+    )
+    if ask is None:
+        return None, "no book"
+    if not is_liquid:
+        return None, "illiquid"
+    if not passes_bid_stability(token_id, bid):
+        return None, "unstable bid"
+    if not should_buy(ask, market):
+        return None, "below ask floor"
+    if MAX_ENTRY_ASK > 0 and ask > MAX_ENTRY_ASK + 1e-9:
+        return None, "above max ask"
+    if not has_profit_room(ask):
+        return None, "no TP room"
+    if not passes_entry_execution_quality(bid, ask):
+        return None, "entry drag"
+    if spread_pct is None or volume is None:
+        return None, "illiquid"
+    hrs_left = hours_until_resolution(market)
+    market_score = score_market_for_upside(
+        market, ask, spread_pct, float(volume), hours_left=hrs_left
+    )
+    if market_score < MIN_MARKET_SCORE:
+        return None, "low score"
+    end_dt = _market_end_datetime(market)
+    opp = {
+        "market_id": condition_id or market.get("id", ""),
+        "condition_id": condition_id,
+        "market_question": work["question"],
+        "token_id": token_id,
+        "outcome": work["outcome"],
+        "ask_price": ask,
+        "bid": bid,
+        "entry_drag_pct": entry_drag_pct(bid, ask),
+        "spread_pct": spread_pct,
+        "depth": depth,
+        "volume_24h": volume,
+        "hours_to_resolution": hrs_left,
+        "resolution_end": end_dt.isoformat() if end_dt else None,
+        "neg_risk_hint": work.get("neg_risk_hint"),
+        "market_score": market_score,
+    }
+    return opp, ""
 
 
 def scan_and_trade() -> None:
@@ -1673,14 +2283,17 @@ def scan_and_trade() -> None:
     skipped_profit_room = 0
     filter_stats = {
         "closed": 0,
+        "blacklisted": 0,
         "no book": 0,
         "illiquid": 0,
+        "unstable bid": 0,
         "below ask floor": 0,
         "above max ask": 0,
         "no TP room": 0,
         "entry drag": 0,
         "low score": 0,
     }
+    scan_work: List[dict] = []
     for market in markets:
         if not market.get("accepting_orders", market.get("acceptingOrders", True)):
             continue
@@ -1689,12 +2302,16 @@ def scan_and_trade() -> None:
         if not is_close_to_resolution(market):
             filter_stats["closed"] += 1
             continue
-        condition_id = market.get("condition_id") or market.get("conditionId") or ""
+        condition_id = str(market.get("condition_id") or market.get("conditionId") or "")
+        if condition_id and is_blacklisted(condition_id):
+            filter_stats["blacklisted"] += 1
+            continue
         vol_hint = market.get("gamma_volume_24h")
         if vol_hint is None and condition_id:
             vol_hint = gamma_volume_24h(condition_id)
         question = market.get("question", "N/A")
         neg_flag = market.get("neg_risk", market.get("negRisk"))
+        eff_thresh = effective_price_threshold(market)
         tokens = market.get("tokens") or []
         for tok in tokens:
             if not isinstance(tok, dict):
@@ -1702,68 +2319,45 @@ def scan_and_trade() -> None:
             token_id = str(tok.get("token_id") or tok.get("tokenId") or "")
             if not token_id:
                 continue
+            if reentry_blocked(token_id):
+                continue
             outcome_title = str(tok.get("outcome", "Unknown"))
             price_hint = tok.get("price")
             if price_hint is not None:
                 try:
-                    if float(price_hint) < PRICE_THRESHOLD:
+                    if float(price_hint) < eff_thresh:
                         continue
                 except (TypeError, ValueError):
                     pass
-            book_data = _fetch_order_book_payload(token_id)
-            if not book_data:
-                filter_stats["no book"] += 1
-                continue
-            is_liquid, spread_pct, depth, volume, bid, ask = check_liquidity(
-                token_id, condition_id or None, vol_hint, book_data
-            )
-            if ask is None:
-                filter_stats["no book"] += 1
-                continue
-            if not is_liquid:
-                filter_stats["illiquid"] += 1
-                continue
-            if not should_buy(ask):
-                filter_stats["below ask floor"] += 1
-                continue
-            if MAX_ENTRY_ASK > 0 and ask > MAX_ENTRY_ASK + 1e-9:
-                filter_stats["above max ask"] += 1
-                continue
-            if not has_profit_room(ask):
-                skipped_profit_room += 1
-                filter_stats["no TP room"] += 1
-                continue
-            if not passes_entry_execution_quality(bid, ask):
-                filter_stats["entry drag"] += 1
-                continue
-            if spread_pct is None or volume is None:
-                filter_stats["illiquid"] += 1
-                continue
-            market_score = score_market_for_upside(market, ask, spread_pct, float(volume))
-            if market_score < MIN_MARKET_SCORE:
-                filter_stats["low score"] += 1
-                continue
-            hrs_left = hours_until_resolution(market)
-            end_dt = _market_end_datetime(market)
-            opportunities.append(
+            scan_work.append(
                 {
-                    "market_id": condition_id or market.get("id", ""),
-                    "condition_id": condition_id,
-                    "market_question": question,
                     "token_id": token_id,
+                    "market": market,
+                    "condition_id": condition_id,
+                    "vol_hint": vol_hint,
+                    "question": question,
                     "outcome": outcome_title,
-                    "ask_price": ask,
-                    "bid": bid,
-                    "entry_drag_pct": entry_drag_pct(bid, ask),
-                    "spread_pct": spread_pct,
-                    "depth": depth,
-                    "volume_24h": volume,
-                    "hours_to_resolution": hrs_left,
-                    "resolution_end": end_dt.isoformat() if end_dt else None,
                     "neg_risk_hint": bool(neg_flag) if neg_flag is not None else None,
-                    "market_score": market_score,
                 }
             )
+
+    if scan_work:
+        with ThreadPoolExecutor(max_workers=SNIPER_BOOK_FETCH_WORKERS) as executor:
+            futures = [executor.submit(_evaluate_scan_work_item, work) for work in scan_work]
+            for fut in as_completed(futures):
+                try:
+                    opp, reason = fut.result()
+                except Exception as exc:
+                    print(f"Warning: scan worker failed: {exc}")
+                    filter_stats["no book"] += 1
+                    continue
+                if opp:
+                    opportunities.append(opp)
+                elif reason:
+                    if reason == "no TP room":
+                        skipped_profit_room += 1
+                    key = reason if reason in filter_stats else "illiquid"
+                    filter_stats[key] = filter_stats.get(key, 0) + 1
 
     seen_tokens: set = set()
     deduped: List[dict] = []
@@ -1805,7 +2399,12 @@ def scan_and_trade() -> None:
         if pos_key in positions:
             continue
         slots_remaining = max(1, MAX_POSITIONS - len(positions))
-        qty = calculate_position_size(opp["ask_price"], slots_remaining=slots_remaining)
+        quality = _position_quality_multiplier(opp)
+        qty = calculate_position_size(
+            opp["ask_price"],
+            slots_remaining=slots_remaining,
+            quality_multiplier=quality,
+        )
         place_buy_order(
             opp["token_id"],
             opp["market_id"],
@@ -1837,9 +2436,10 @@ def scan_and_trade() -> None:
     except Exception as exc:
         slog.warn(f"could not write {DASHBOARD_SNAPSHOT_FILE}: {exc}")
 
+    cycle_sleep = _effective_cycle_sleep_seconds()
     slog.cycle_footer(
         duration_sec=time.monotonic() - cycle_started,
-        sleep_sec=SNIPER_SLEEP_SECONDS,
+        sleep_sec=cycle_sleep,
         placed=placed,
         candidates=len(opportunities),
     )
@@ -1921,6 +2521,24 @@ def main() -> None:
             f"Upside score ≥ {MIN_MARKET_SCORE}/{UPSIDE_SCORE_MAX}  ·  "
             f"REQUIRE_MARKET_MOMENTUM={REQUIRE_MARKET_MOMENTUM}"
         )
+    if TRAILING_STOP:
+        config_lines.append(
+            f"Trailing stop: {TRAILING_STOP_PCT}% below HWM after +{TRAILING_STOP_TRIGGER * 100:.1f}%"
+        )
+    if PARTIAL_EXIT:
+        config_lines.append(
+            f"Partial exit: {PARTIAL_EXIT_RATIO * 100:.0f}% at target, residual SL floor +{PARTIAL_EXIT_RESIDUAL_SL:.4f}"
+        )
+    if SL_BLACKLIST_TTL_HOURS > 0:
+        config_lines.append(f"SL blacklist: {SL_BLACKLIST_TTL_HOURS:.0f}h TTL → {SL_BLACKLIST_FILE}")
+    if CHECK_RESOLUTION_ON_HOLD:
+        config_lines.append(f"Resolution fast exit @ {RESOLUTION_EXIT_PRICE:.4f}")
+    if DYNAMIC_PRICE_THRESHOLD:
+        config_lines.append(f"Dynamic entry threshold boost up to +{DYNAMIC_THRESHOLD_MAX_BOOST:.2f}")
+    if SNIPER_SLEEP_SECONDS_ACTIVE > 0:
+        config_lines.append(
+            f"Active sleep: {SNIPER_SLEEP_SECONDS_ACTIVE}s when position <2h to end"
+        )
     slog.config_block(config_lines)
     _print_kill_switch_banner()
     slog.emit()
@@ -1944,7 +2562,7 @@ def main() -> None:
                     save_state()
                     sys.exit(2)
                 traceback.print_exc()
-            sleep_seconds = SNIPER_SLEEP_SECONDS
+            sleep_seconds = _effective_cycle_sleep_seconds()
             if _kill_soft_reason and time.monotonic() < _kill_soft_until:
                 sleep_seconds = max(sleep_seconds, SNIPER_KILL_SOFT_SLEEP_SECONDS)
             slog.sleep_notice(sleep_seconds)

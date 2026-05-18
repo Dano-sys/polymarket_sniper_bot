@@ -61,7 +61,7 @@ def main() -> None:
             if not is_liquid:
                 continue
             counts["liquid"] += 1
-            if not bot.should_buy(ask):
+            if not bot.should_buy(ask, market):
                 continue
             counts["price_threshold"] += 1
             if bot.MAX_ENTRY_ASK > 0 and ask > bot.MAX_ENTRY_ASK + 1e-9:
@@ -71,7 +71,13 @@ def main() -> None:
             counts["profit_room"] += 1
             if spread_pct is None or volume is None:
                 continue
-            score = bot.score_market_for_upside(market, ask, spread_pct, float(volume))
+            score = bot.score_market_for_upside(
+                market,
+                ask,
+                spread_pct,
+                float(volume),
+                hours_left=bot.hours_until_resolution(market),
+            )
             if score < bot.MIN_MARKET_SCORE:
                 continue
             counts["min_market_score"] += 1

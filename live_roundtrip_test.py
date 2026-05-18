@@ -114,13 +114,19 @@ def collect_candidates() -> List[dict]:
             )
             if ask is None or not is_liquid:
                 continue
-            if not bot.should_buy(ask):
+            if not bot.should_buy(ask, market):
                 continue
             if not bot.has_profit_room(ask):
                 continue
             if spread_pct is None or volume is None:
                 continue
-            market_score = bot.score_market_for_upside(market, ask, spread_pct, float(volume))
+            market_score = bot.score_market_for_upside(
+                market,
+                ask,
+                spread_pct,
+                float(volume),
+                hours_left=bot.hours_until_resolution(market),
+            )
             if market_score < bot.MIN_MARKET_SCORE:
                 continue
 
